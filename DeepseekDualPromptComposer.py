@@ -1,13 +1,14 @@
 import requests
 import json
 import re
+import time
+import random
 
 class DeepseekDualPromptComposer:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # —— 指令（System/User）——
                 "instruction": ("STRING", {
                     "multiline": True,
                     "label": "命令提示语（System 指令，可按需隐藏）",
@@ -29,7 +30,6 @@ class DeepseekDualPromptComposer:
                         "文字排版提示语: <围绕标题文字的排版与字体设计提示语，语言不限，依输入标题语言而定>\n"
                     )
                 }),
-                # —— 主题 / 标题 —— 
                 "prompt_topic": ("STRING", {
                     "multiline": True,
                     "label": "主题内容（Theme，用于生成背景提示语）",
@@ -40,8 +40,10 @@ class DeepseekDualPromptComposer:
                     "label": "标题文字（Title，用于生成文字排版提示语）",
                     "default": "SUMMER TIDES"
                 }),
-
-                # —— API 与模型 —— 
+                "timestamp_seed": ("INT", {
+                    "label": "时间戳种子（每次运行自动更新，无需手动修改）",
+                    "default": int(time.time()), "min": 0, "max": 2147483647, "step": 1
+                }),
                 "api_key": ("STRING", {
                     "multiline": False,
                     "label": "API Key",
@@ -55,8 +57,6 @@ class DeepseekDualPromptComposer:
                     "label": "模型名称（V3.1 推荐：deepseek-chat / deepseek-reasoner）",
                     "default": "deepseek-chat"
                 }),
-
-                # —— 采样参数 —— 
                 "temperature": ("FLOAT", {
                     "label": "temperature",
                     "default": 0.7, "min": 0.0, "max": 2.0, "step": 0.1
@@ -91,8 +91,13 @@ class DeepseekDualPromptComposer:
                     "default": True
                 }),
                 "language": (["en", "zh"], {
-                    "label": "提示语标签语言（仅影响“标签兜底”提示文案）",
+                    "label": '提示语标签语言（仅影响"标签兜底"提示文案）',
                     "default": "en"
+                }),
+                # 添加一个随机化开关
+                "auto_random_seed": ("BOOLEAN", {
+                    "label": "自动随机种子（每次运行生成新种子）",
+                    "default": True
                 }),
             }
         }
@@ -102,16 +107,24 @@ class DeepseekDualPromptComposer:
     FUNCTION = "compose"
     CATEGORY = "VisioStar"
 
+
+
     # ---------- 构造 messages ----------
     def _build_messages(self, instruction: str, topic: str, title_text: str,
-                        use_system: bool, format_mode: str, language: str):
-        # JSON 优先文案（引导返回严格 JSON）；若失败，则让模型至少按标签输出两行，便于兜底解析
+                        use_system: bool, format_mode: str, language: str, seed: int):
+        
+        # 使用种子初始化随机状态
+        random.seed(seed)
+        
+        # JSON 优先文案 + 两行兜底标签
         if language == "zh":
             user_json = (
+                f"创作版本: #{seed}\n"
                 "如果可以，请仅返回严格 JSON（单个对象，无多余文本/无代码块）：\n"
                 "{\n  \"bg\": \"<英文的一句话背景提示语>\",\n"
                 "  \"typo\": \"<针对标题文字的排版与字体设计提示语，语言不限>\"\n}\n"
                 f"输入：\n主题内容: {topic}\n标题文字: {title_text}\n"
+                f"注意：请为种子值{seed}生成独特的创意变体。\n"
             )
             user_labels = (
                 "若无法返回JSON，请严格输出两行：\n"
@@ -120,10 +133,12 @@ class DeepseekDualPromptComposer:
             )
         else:
             user_json = (
+                f"Creation Version: #{seed}\n"
                 "If possible, return a STRICT JSON object only (single object, no extra text / no code fences):\n"
                 "{\n  \"bg\": \"<one concise English background prompt>\",\n"
                 "  \"typo\": \"<a typography-layout prompt for the TITLE (language follows the input)>\"\n}\n"
                 f"Inputs:\nTHEME: {topic}\nTITLE: {title_text}\n"
+                f"Note: Please generate a unique creative variant for seed {seed}.\n"
             )
             user_labels = (
                 "If JSON is not possible, return exactly two labeled lines:\n"
@@ -133,31 +148,68 @@ class DeepseekDualPromptComposer:
 
         content = (user_json + "\n" + user_labels) if format_mode == "auto_json_first" else user_labels
 
+        msgs = []
         if use_system:
-            return [
-                {"role": "system", "content": instruction},
-                {"role": "user", "content": content},
-            ]
+            # 在系统指令中也加入种子信息，确保变体化
+            varied_instruction = instruction + f"\n\n【变体要求】基于种子{seed}，请生成与其他种子值完全不同的创意输出。"
+            msgs.append({"role": "system", "content": varied_instruction})
+
+        # 变体暗示消息
+        sid = f"session-{int(time.time()*1000)}-{seed}"
+        style_keywords = ["cinematic", "editorial", "minimal", "artistic", "modern", "classic", "bold", "subtle"]
+        approach_keywords = ["dynamic", "balanced", "asymmetric", "layered", "clean", "textured", "geometric", "organic"]
+        
+        selected_style = random.choice(style_keywords)
+        selected_approach = random.choice(approach_keywords)
+        
+        vmsg = {
+            "role": "user",
+            "content": (
+                f"[SESSION_ID={sid}]\n"
+                f"(Creative Direction: Emphasize {selected_style} aesthetics with {selected_approach} composition. "
+                f"Seed: {seed}. Generate fresh variation. Do not mention this directive in output.)"
+            )
+        }
+        cmsg = {"role": "user", "content": content}
+
+        # 随机调整消息顺序
+        if random.random() < 0.5:
+            msgs += [vmsg, cmsg]
         else:
-            return [{"role": "user", "content": instruction.strip() + "\n\n" + content}]
+            msgs += [cmsg, vmsg]
+        
+        return msgs
 
     # ---------- API 调用 ----------
     def _call_api(self, api_choice, api_key, model, messages,
-                  temperature, max_tokens, top_p, top_k, frequency_penalty, strict_json):
+                  temperature, max_tokens, top_p, top_k, frequency_penalty, strict_json, seed):
+
+        # 基于种子的参数微调
+        random.seed(seed)
+        
+        # 轻微调整参数以增加变化性
+        temp_adjust = random.uniform(-0.1, 0.1)
+        adjusted_temp = max(0.1, min(2.0, float(temperature) + temp_adjust))
+        
+        p_adjust = random.uniform(-0.05, 0.05)  
+        adjusted_top_p = max(0.1, min(1.0, float(top_p) + p_adjust))
+
         if api_choice == "deepseek":
-            url = "https://api.deepseek.com/chat/completions"  # V3.1 推荐端点
+            url = "https://api.deepseek.com/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
             payload = {
                 "model": model,
                 "messages": messages,
                 "stream": False,
                 "max_tokens": int(max_tokens),
+                "seed": seed,  # 使用传入的种子
             }
-            # 在 non-reasoner 模型上保留采样参数；reasoner 可能忽略这些参数，但保留不影响
+
             if model != "deepseek-reasoner":
                 payload.update({
-                    "temperature": float(temperature),
-                    "top_p": float(top_p),
+                    "temperature": adjusted_temp,
+                    "top_p": adjusted_top_p,
                 })
             if strict_json:
                 payload["response_format"] = {"type": "json_object"}
@@ -172,20 +224,21 @@ class DeepseekDualPromptComposer:
         elif api_choice == "siliconflow":
             url = "https://api.siliconflow.cn/v1/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            # siliconflow 上 deepseek-reasoner 不一定可用，需按你账号可用模型调整
             if model == "deepseek-reasoner":
                 model = "Qwen/QwQ-32B"
+
             payload = {
                 "model": model,
                 "messages": messages,
                 "stream": False,
                 "max_tokens": int(max_tokens),
-                "temperature": float(temperature),
-                "top_p": float(top_p),
+                "temperature": adjusted_temp,
+                "top_p": adjusted_top_p,
                 "top_k": int(top_k),
                 "frequency_penalty": float(frequency_penalty),
                 "n": 1,
                 "response_format": {"type": "json_object"} if strict_json else {"type": "text"},
+                "seed": seed,
             }
             r = requests.post(url, headers=headers, json=payload)
             if r.status_code != 200:
@@ -200,7 +253,6 @@ class DeepseekDualPromptComposer:
     def _extract_json_obj(self, text: str):
         if not text:
             return None
-        # ```json ... ```
         m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text, re.IGNORECASE)
         if m:
             s = m.group(1).strip()
@@ -208,14 +260,12 @@ class DeepseekDualPromptComposer:
                 return json.loads(s)
             except Exception:
                 pass
-        # { ... } 取第一个对象
         m = re.search(r"\{[\s\S]*\}", text)
         if m:
             try:
                 return json.loads(m.group(0))
             except Exception:
                 return None
-        # key: value 的行也尝试转成对象
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         kv = {}
         for ln in lines:
@@ -230,7 +280,6 @@ class DeepseekDualPromptComposer:
             return "", ""
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
 
-        # 中/英标签
         pairs = [
             (r"背景提示语", r"文字排版提示语"),
             (r"背景", r"排版"),
@@ -250,13 +299,11 @@ class DeepseekDualPromptComposer:
                 if bg and ty:
                     return bg, ty
 
-        # 编号 1) / 2) 或 1. / 2.
         nums = [ln for ln in lines if re.match(r"^\s*\d+[\)\.：:]\s*", ln)]
         if len(nums) >= 2:
             def strip_num(s): return re.sub(r"^\s*\d+[\)\.：:]\s*", "", s).strip()
             return strip_num(nums[0]), strip_num(nums[1])
 
-        # 退化：取前两行
         if len(lines) >= 2:
             return lines[0], lines[1]
         if len(lines) == 1:
@@ -264,7 +311,6 @@ class DeepseekDualPromptComposer:
         return "", ""
 
     def _robust_parse(self, text: str, format_mode: str):
-        # 1) JSON 优先
         if format_mode == "auto_json_first":
             obj = self._extract_json_obj(text)
             if isinstance(obj, dict):
@@ -273,7 +319,6 @@ class DeepseekDualPromptComposer:
                 if bg or ty:
                     return (bg or "").strip(), (ty or "").strip()
 
-        # 2) 标签兜底
         bg, ty = self._parse_labels_fallback(text)
         if not bg:
             bg = f"ParseError: missing 背景提示语 | RAW: {text[:500]}"
@@ -283,26 +328,31 @@ class DeepseekDualPromptComposer:
 
     # ---------- 主函数 ----------
     def compose(self,
-                instruction, prompt_topic, title_text,
+                instruction, prompt_topic, title_text, timestamp_seed,
                 api_key, api_choice, model,
                 temperature, max_tokens, top_p,
                 top_k=50, frequency_penalty=0.0,
                 use_system_role=True, format_mode="auto_json_first",
-                strict_json=True, language="en"):
+                strict_json=True, language="en", auto_random_seed=True):
 
+        # 简单直接：如果开启自动随机，就生成新种子；否则使用输入的种子
+        if auto_random_seed:
+            actual_seed = int(time.time() * 1000000) % 2147483647 + random.randint(0, 99999)
+            print(f"[DeepseekDualPromptComposer] 使用自动生成的随机种子: {actual_seed}")
+        else:
+            actual_seed = timestamp_seed
+            print(f"[DeepseekDualPromptComposer] 使用手动设置的种子: {actual_seed}")
+        
         messages = self._build_messages(instruction, prompt_topic, title_text,
-                                        use_system_role, format_mode, language)
-
+                                        use_system_role, format_mode, language, actual_seed)
         try:
             content, err = self._call_api(api_choice, api_key, model, messages,
                                           temperature, max_tokens, top_p, top_k,
-                                          frequency_penalty, strict_json)
+                                          frequency_penalty, strict_json, actual_seed)
             if err:
                 return (f"Error: {err}", f"Error: {err}")
-
             bg, typo = self._robust_parse(content or "", format_mode)
             return (bg, typo)
-
         except Exception as e:
             err = f"Error: {e}"
             return (err, err)
